@@ -208,10 +208,9 @@ picard-plugin/plugin_source/arabic_tagging/__init__.py
 
 ## Current limitations
 
-- Generated titles still have to be copied and pasted into Picard manually.
-- The plugin is currently designed around the jlesage Docker version of Picard.
+- This pligin API for picard v2 i know picard v3 is in pre-release but this likely wouldnt work with picard v3
+- The plugin is currently designed around the jlesage Docker version of Picard. (should work on the official picard but not tested as i use jliesage
 - The project has mainly been tested with Arabic.
-- Metadata edge cases have not all been handled or tested.
 - The code needs review and restructuring by an experienced Python developer.
 - Installation is still more technical than I would like.
 
