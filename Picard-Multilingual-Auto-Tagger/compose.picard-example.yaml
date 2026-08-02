@@ -1,0 +1,36 @@
+# networks section is needed to connect with Picard-Multilingual-Auto-Tagger
+services:
+  picard:
+    image: jlesage/musicbrainz-picard:v26.07.1
+    container_name: picard-jlesage
+
+    ports:
+      - "5900:5800"
+
+    environment:
+      TZ: Asia/Tokyo
+      LANG: en_US.UTF-8
+      USER_ID: "568"
+      GROUP_ID: "568"
+      UMASK: "0002"
+      KEEP_APP_RUNNING: "1"
+      DARK_MODE: "1"
+      INSTALL_PACKAGES: font-noto-arabic # this is needed for arabic letters
+      SECURE_CONNECTION: "1" #optional routes all to https but helps container to copy from outside container
+
+      ARABIC_SORT_API_URL: http://arabic-sort:8787
+      ARABIC_SORT_PUBLIC_URL: http://192.168.50.195:8787 # change to your actual IP
+
+    volumes:
+      - /mnt/path-to-your-config:/config:rw # change to your path
+      - /mnt/path-to-your-music:/music:rw # change to your path
+
+    networks:
+      - arabic-sort-network 
+
+    restart: unless-stopped
+
+networks:
+  arabic-sort-network:
+    external: true
+    name: arabic-sort-network

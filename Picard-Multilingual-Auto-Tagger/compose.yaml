@@ -1,0 +1,65 @@
+# importnet note: in your other compose.yaml for image: jlesage/musicbrainz-picard you need to add these 2 environment lines and a network
+# check the compose.picard-example yaml for clarification
+
+
+services:
+  arabic-sort:
+    build:
+      context: ./auto-tagger #if the folder in root eg if u deploying using arcane or docker manager and file in root just put . Without /auto-tagger
+      dockerfile: Dockerfile
+
+    image: arabic-sort:local
+    pull_policy: never
+    container_name: arabic-sort
+
+    user: "568:568"
+
+    ports:
+      - "8787:8787"
+
+    environment:
+      TZ: Asia/Tokyo
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen3:8b # the main.py have instruction to not use reasoning
+      OLLAMA_KEEP_ALIVE: 10m
+      DATABASE_PATH: /data/arabic_sort.db
+      
+      PUBLIC_BASE_URL: http://192.168.50.195:8787 # change Ip to your actual server IP
+      PREFILL_TTL_SECONDS: "1800"
+
+    volumes:
+      - /mnt/path/to-where/database-will-be-stored:/data:rw #edit your path
+
+    depends_on:
+      ollama:
+        condition: service_started
+
+    networks:
+      - arabic-sort-network
+
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: arabic-sort-ollama
+
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_KEEP_ALIVE: "10m"
+
+    volumes:
+      - /mnt/path-to/your-config-models/ollama:/root/.ollama:rw #edit your path
+
+    expose:
+      - "11434"
+
+    networks:
+      arabic-sort-network:
+        aliases:
+          - ollama
+
+    restart: unless-stopped
+
+networks:
+  arabic-sort-network:
+    name: arabic-sort-network
