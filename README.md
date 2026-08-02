@@ -21,7 +21,7 @@ This project connects Picard to a small companion web app. The app receives the 
 3. A small browser window opens from inside the Picard container.
 4. The album, artist and track fields are populated automatically.
 5. Click **Generate** to send the information to the local LLM.
-6. Copy the suggested title and paste it into Picard.
+6. click send to send the song title to the specific track automatically.
 7. When a suggestion is incorrect, edit it manually and click **Verify & Save**.
 
 Verified corrections are stored in the local SQLite database. The next time the same title appears, the saved result can be reused instead of asking the LLM again.
@@ -42,6 +42,10 @@ Verified corrections are stored in the local SQLite database. The next time the 
 
 ![Generated localized titles](screenshots/generated.jpeg)
 
+### Click send to automatically send the song title back to picard
+
+![Click send to automatically send the song title back to picard](screenshots/send-button.jpeg)
+
 ### auto-tagger can also be used alone from web browser
 
 ![Generated track titles](screenshots/app.jpeg)
@@ -56,6 +60,7 @@ Verified corrections are stored in the local SQLite database. The next time the 
 - Reuses saved corrections without calling the LLM again
 - Runs through Docker Compose
 - Designed around the `jlesage/musicbrainz-picard` container
+- send button, sends only that title back to its matching track in Picard and it dosent save a user must save from picard (this is done for safety)
 
 ## Project structure
 
