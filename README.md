@@ -92,8 +92,17 @@ Some internal names still use `arabic-sort` or `arabic_tagging` because the proj
 The supplied Compose file runs Ollama as part of the stack.
 
 ## Installation
-Check the two provided compose files for clearer understanding
 
+Choose the installation method that fits your setup:
+
+- **Docker Compose / command line:** continue with the instructions below.
+- **Arcane:** see the [step-by-step Arcane installation guide](docs/INSTALL-ARCANE.md).
+
+Check both provided Compose files before starting:
+
+- `compose.yaml`
+- `compose.picard-example.yaml`
+  
 ### 1. Clone the repository
 
 ```bash
