@@ -6,9 +6,9 @@ import secrets
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 router = APIRouter(tags=["Picard integration"])
@@ -29,8 +29,14 @@ except ValueError:
 MAX_TITLES = 500
 MAX_FIELD_LENGTH = 1000
 MAX_TOTAL_TITLE_LENGTH = 100_000
+MAX_TITLE_LENGTH = 1000
 
 _prefill_sessions: dict[str, dict[str, Any]] = {}
+
+
+class PicardTrackInput(BaseModel):
+    row_id: str
+    title: str = ""
 
 
 class PicardPrefillRequest(BaseModel):
@@ -38,6 +44,18 @@ class PicardPrefillRequest(BaseModel):
     album: str = ""
     titles: list[str]
     source: str = "unknown"
+    tracks: list[PicardTrackInput] = Field(default_factory=list)
+
+
+class SendTitleRequest(BaseModel):
+    row_index: int
+    title: str
+
+
+class CommandAckRequest(BaseModel):
+    status: str
+    effective_title: str = ""
+    error: str = ""
 
 
 def _clean_expired_sessions() -> None:
@@ -61,8 +79,43 @@ def _clean_text(value: Any, field_name: str) -> str:
     return cleaned
 
 
+def _clean_title(value: Any) -> str:
+    title = str(value or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be empty.")
+    if len(title) > MAX_TITLE_LENGTH:
+        raise HTTPException(status_code=400, detail="Title is too long.")
+    if "\x00" in title:
+        raise HTTPException(status_code=400, detail="Title contains an invalid character.")
+    return title
+
+
+def _get_session(session_id: str) -> dict[str, Any]:
+    _clean_expired_sessions()
+    session = _prefill_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This Picard session is invalid or has expired.",
+        )
+    return session
+
+
+def _require_control_token(
+    session: dict[str, Any],
+    authorization: str | None,
+) -> None:
+    expected = session["control_token"]
+    supplied = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Invalid Picard control token.")
+
+
 def _render_prefilled_form(
     *,
+    session_id: str,
     artist: str,
     album: str,
     titles: list[str],
@@ -72,6 +125,7 @@ def _render_prefilled_form(
     album_html = html.escape(album, quote=True)
     titles_html = html.escape("\n".join(titles), quote=False)
     source_html = html.escape(source or "unknown", quote=True)
+    session_html = html.escape(session_id, quote=True)
 
     content = f"""<!doctype html>
 <html lang="en">
@@ -154,6 +208,8 @@ def _render_prefilled_form(
     </div>
 
     <form method="post" action="/generate">
+        <input type="hidden" name="picard_session" value="{session_html}">
+
         <label for="artist">Artist</label>
         <input id="artist" name="artist" value="{artist_html}"
                placeholder="Example: Amr Diab">
@@ -187,7 +243,7 @@ async def create_picard_prefill(payload: PicardPrefillRequest) -> dict[str, Any]
     album = _clean_text(payload.album, "album")
     source = _clean_text(payload.source, "source") or "unknown"
 
-    if source not in {"cluster", "album", "file", "unknown"}:
+    if source not in {"cluster", "album", "unknown"}:
         raise HTTPException(status_code=400, detail="Unsupported Picard source.")
 
     if not payload.titles:
@@ -212,38 +268,167 @@ async def create_picard_prefill(payload: PicardPrefillRequest) -> dict[str, Any]
     if sum(len(title) for title in titles) > MAX_TOTAL_TITLE_LENGTH:
         raise HTTPException(status_code=400, detail="Combined title data is too large.")
 
-    token = secrets.token_urlsafe(24)
-    _prefill_sessions[token] = {
+    if payload.tracks and len(payload.tracks) != len(titles):
+        raise HTTPException(
+            status_code=400,
+            detail="Track identity count does not match title count.",
+        )
+
+    rows: list[dict[str, str]] = []
+    if payload.tracks:
+        seen: set[str] = set()
+        for position, track in enumerate(payload.tracks):
+            row_id = _clean_text(track.row_id, f"row_id {position + 1}")
+            if not row_id or row_id in seen:
+                raise HTTPException(status_code=400, detail="Invalid or duplicate row ID.")
+            seen.add(row_id)
+            rows.append({"row_id": row_id, "title": titles[position]})
+    else:
+        rows = [
+            {"row_id": secrets.token_urlsafe(16), "title": title}
+            for title in titles
+        ]
+
+    session_id = secrets.token_urlsafe(24)
+    control_token = secrets.token_urlsafe(32)
+    _prefill_sessions[session_id] = {
         "created_at": time.time(),
         "artist": artist,
         "album": album,
         "titles": titles,
         "source": source,
+        "rows": rows,
+        "control_token": control_token,
+        "commands": {},
+        "next_command_id": 1,
+        "last_picard_poll": 0.0,
     }
 
-    path = f"/picard/{token}"
+    path = f"/picard/{session_id}"
     return {
         "ok": True,
+        "session_id": session_id,
+        "picard_token": control_token,
         "url": f"{PUBLIC_BASE_URL}{path}",
         "path": path,
         "expires_in": PREFILL_TTL_SECONDS,
+        "expires_at": int(time.time()) + PREFILL_TTL_SECONDS,
     }
 
 
-@router.get("/picard/{token}", response_class=HTMLResponse)
-async def open_picard_prefill(token: str) -> HTMLResponse:
-    _clean_expired_sessions()
-    session = _prefill_sessions.get(token)
-
-    if session is None:
-        raise HTTPException(
-            status_code=404,
-            detail="This Picard prefill link is invalid or has expired.",
-        )
-
+@router.get("/picard/{session_id}", response_class=HTMLResponse)
+async def open_picard_prefill(session_id: str) -> HTMLResponse:
+    session = _get_session(session_id)
     return _render_prefilled_form(
+        session_id=session_id,
         artist=session["artist"],
         album=session["album"],
         titles=session["titles"],
         source=session["source"],
     )
+
+
+@router.post("/picard/{session_id}/send")
+async def queue_title_for_picard(
+    session_id: str,
+    payload: SendTitleRequest,
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    title = _clean_title(payload.title)
+
+    if payload.row_index < 0 or payload.row_index >= len(session["rows"]):
+        raise HTTPException(status_code=400, detail="Invalid track row.")
+
+    command_id = session["next_command_id"]
+    session["next_command_id"] += 1
+    row = session["rows"][payload.row_index]
+
+    command = {
+        "command_id": command_id,
+        "row_id": row["row_id"],
+        "title": title,
+        "status": "queued",
+        "created_at": time.time(),
+        "effective_title": "",
+        "error": "",
+    }
+    session["commands"][command_id] = command
+
+    connected = (time.time() - session["last_picard_poll"]) < 10
+    return {
+        "ok": True,
+        "command_id": command_id,
+        "status": "queued",
+        "picard_connected": connected,
+    }
+
+
+@router.get("/picard/{session_id}/commands/{command_id}")
+async def browser_command_status(
+    session_id: str,
+    command_id: int,
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    command = session["commands"].get(command_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Command not found.")
+    return {
+        "ok": True,
+        "command_id": command_id,
+        "status": command["status"],
+        "effective_title": command["effective_title"],
+        "error": command["error"],
+    }
+
+
+@router.get("/picard/control/{session_id}/commands")
+async def poll_picard_commands(
+    session_id: str,
+    after: int = 0,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    _require_control_token(session, authorization)
+    session["last_picard_poll"] = time.time()
+
+    pending: list[dict[str, Any]] = []
+    for command_id in sorted(session["commands"]):
+        command = session["commands"][command_id]
+        if command_id <= after:
+            continue
+        if command["status"] not in {"queued", "delivered"}:
+            continue
+        command["status"] = "delivered"
+        pending.append(
+            {
+                "command_id": command_id,
+                "row_id": command["row_id"],
+                "title": command["title"],
+            }
+        )
+
+    return {"ok": True, "commands": pending}
+
+
+@router.post("/picard/control/{session_id}/commands/{command_id}/ack")
+async def acknowledge_picard_command(
+    session_id: str,
+    command_id: int,
+    payload: CommandAckRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    session = _get_session(session_id)
+    _require_control_token(session, authorization)
+
+    command = session["commands"].get(command_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Command not found.")
+
+    if payload.status not in {"applied", "failed"}:
+        raise HTTPException(status_code=400, detail="Invalid command status.")
+
+    command["status"] = payload.status
+    command["effective_title"] = str(payload.effective_title or "").strip()
+    command["error"] = str(payload.error or "").strip()[:1000]
+    command["completed_at"] = time.time()
+    return {"ok": True}

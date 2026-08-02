@@ -328,18 +328,19 @@ def page(content: str, title: str = "Arabic Sort Bridge") -> HTMLResponse:
         }}
         .arabic-cell {{
             display: grid;
-            grid-template-columns: minmax(240px, 1fr) auto auto;
+            grid-template-columns: minmax(240px, 1fr) auto auto auto;
             align-items: center;
             gap: 8px;
         }}
         .arabic-cell input {{ min-width: 0; }}
-        .copy-single, .verify-single {{
+        .copy-single, .send-single, .verify-single {{
             width: auto;
             margin: 0;
             padding: 10px 14px;
             white-space: nowrap;
         }}
         .copy-single {{ background: #333; color: #fff; }}
+        .send-single {{ background: #315c7a; color: #fff; }}
         .verify-single {{ background: #2f5f43; color: #fff; }}
         .source {{
             display: inline-block;
@@ -504,6 +505,7 @@ async def generate(
     album: str = Form(default=""),
     profile: str = Form(default=""),
     titles: str = Form(...),
+    picard_session: str = Form(default=""),
 ) -> HTMLResponse:
     original_titles = [line.strip() for line in titles.splitlines() if line.strip()]
     if not original_titles:
@@ -706,6 +708,14 @@ Return JSON only with one Arabic word and no Latin letters or digits.
             else ""
         )
 
+        send_button = ""
+        if picard_session:
+            send_button = f"""
+            <button type="button" class="send-single"
+                    data-row-index="{index - 1}"
+                    onclick="sendToPicard(this)">Send</button>
+            """
+
         rows.append(
             f"""
 <tr>
@@ -720,6 +730,7 @@ Return JSON only with one Arabic word and no Latin letters or digits.
             >
             <button type="button" class="copy-single"
                     onclick="copySingle(this)">Copy</button>
+            {send_button}
             <button type="button" class="verify-single"
                     onclick="verifyAndStore(this)">Verify &amp; Store</button>
         </div>
@@ -736,6 +747,7 @@ Return JSON only with one Arabic word and no Latin letters or digits.
     escaped_artist = html.escape(artist, quote=True)
     escaped_album = html.escape(album, quote=True)
     escaped_profile = html.escape(profile, quote=True)
+    escaped_picard_session = html.escape(picard_session, quote=True)
 
     return page(
         f"""
@@ -748,7 +760,8 @@ Exact title matches are reused before the model is called.
 <div id="page-context"
      data-artist="{escaped_artist}"
      data-album="{escaped_album}"
-     data-dialect="{escaped_profile}"></div>
+     data-dialect="{escaped_profile}"
+     data-picard-session="{escaped_picard_session}"></div>
 
 <table>
     <thead>
@@ -839,6 +852,84 @@ async function copyResults() {{
     }}
 }}
 
+
+async function sendToPicard(button) {{
+    const row = button.closest("tr");
+    const field = row.querySelector(".arabic-result");
+    const status = row.querySelector(".row-status");
+    const context = document.getElementById("page-context");
+    const sessionId = context.dataset.picardSession;
+    const rowIndex = Number(button.dataset.rowIndex);
+    const title = field.value.trim();
+
+    if (!sessionId) {{
+        status.textContent = "This page was not opened from Picard.";
+        status.className = "row-status error";
+        return;
+    }}
+    if (!title) {{
+        status.textContent = "Arabic title cannot be empty.";
+        status.className = "row-status error";
+        return;
+    }}
+
+    button.disabled = true;
+    button.textContent = "Sending...";
+    status.textContent = "Waiting for Picard...";
+    status.className = "row-status notice";
+
+    try {{
+        const response = await fetch(
+            `/picard/${{encodeURIComponent(sessionId)}}/send`,
+            {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{
+                    row_index: rowIndex,
+                    title: title
+                }})
+            }}
+        );
+        const data = await response.json();
+        if (!response.ok || !data.ok) {{
+            throw new Error(data.detail || "Send request failed");
+        }}
+
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {{
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const statusResponse = await fetch(
+                `/picard/${{encodeURIComponent(sessionId)}}/commands/${{data.command_id}}`,
+                {{cache: "no-store"}}
+            );
+            const result = await statusResponse.json();
+            if (!statusResponse.ok || !result.ok) {{
+                throw new Error(result.detail || "Could not read Picard status");
+            }}
+            if (result.status === "applied") {{
+                button.textContent = "Sent ✓";
+                status.textContent = "Title populated in Picard. Click Save in Picard when ready.";
+                status.className = "row-status notice";
+                setTimeout(() => {{
+                    button.textContent = "Send";
+                    button.disabled = false;
+                }}, 1800);
+                return;
+            }}
+            if (result.status === "failed") {{
+                throw new Error(result.error || "Picard rejected the title");
+            }}
+        }}
+
+        throw new Error("Picard did not respond within 30 seconds.");
+    }} catch (error) {{
+        button.disabled = false;
+        button.textContent = "Send";
+        status.textContent = error.message;
+        status.className = "row-status error";
+    }}
+}}
+
 async function verifyAndStore(button) {{
     const row = button.closest("tr");
     const field = row.querySelector(".arabic-result");
@@ -889,3 +980,5 @@ async function verifyAndStore(button) {{
 from app.picard_prefill import router as picard_prefill_router
 app.include_router(picard_prefill_router)
 
+from app.picard_prefill import router as picard_router
+app.include_router(picard_router)
